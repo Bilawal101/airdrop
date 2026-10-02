@@ -16,8 +16,24 @@
       flex-direction: column;
       align-items: center;
     }
-    h2 { color: #f0f6fc; margin: 10px 0; text-align: center; }
-    #status { color: #8b949e; margin-bottom: 15px; font-size: 14px; }
+    h2 { color: #f0f6fc; margin: 10px 0; }
+    #status { color: #8b949e; margin-bottom: 10px; font-size: 13px; text-align: center; }
+    
+    /* Live Signal Meter */
+    #meter-container {
+      width: 100%;
+      max-width: 400px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 8px;
+      margin-bottom: 15px;
+      display: none;
+    }
+    .meter-label { font-size: 11px; color: #8b949e; margin-bottom: 4px; }
+    .bar-bg { background: #21262d; height: 10px; border-radius: 5px; overflow: hidden; }
+    #signal-bar { width: 0%; height: 100%; background: #3fb950; transition: width 0.05s; }
+
     #startBtn {
       background: #238636;
       color: #fff;
@@ -31,14 +47,14 @@
     }
     #chat-container {
       width: 100%;
-      max-width: 450px;
+      max-width: 400px;
       display: none;
       flex-direction: column;
       gap: 10px;
     }
     #chatbox {
       width: 100%;
-      height: 280px;
+      height: 250px;
       background: #161b22;
       border: 1px solid #30363d;
       border-radius: 8px;
@@ -48,12 +64,7 @@
       flex-direction: column;
       gap: 8px;
     }
-    .msg {
-      padding: 8px 12px;
-      border-radius: 6px;
-      max-width: 80%;
-      word-break: break-all;
-    }
+    .msg { padding: 8px 12px; border-radius: 6px; max-width: 80%; word-break: break-all; }
     .incoming { background: #21262d; color: #3fb950; align-self: flex-start; }
     .outgoing { background: #1f6feb; color: #ffffff; align-self: flex-end; }
     .input-row { display: flex; gap: 8px; }
@@ -80,61 +91,54 @@
 <body>
 
   <h2>ACOUSTIC AIRDROP</h2>
-  <div id="status">Standby: Tap to initialize Audio</div>
+  <div id="status">Standby: Tap Start to activate mic & audio - v2</div>
   <button id="startBtn" onclick="initAudio()">START AIRDROP</button>
+
+  <div id="meter-container">
+    <div class="meter-label">Live Ultrasonic Signal Strength:</div>
+    <div class="bar-bg"><div id="signal-bar"></div></div>
+  </div>
 
   <div id="chat-container">
     <div id="chatbox"></div>
     <div class="input-row">
-      <input id="textInput" type="text" placeholder="Type secret message..." />
+      <input id="textInput" type="text" placeholder="Type message..." />
       <button id="sendBtn" onclick="sendMessage()">SEND</button>
     </div>
   </div>
 
   <script>
-   // Communication Frequencies (Hz)
-    const PREAMBLE_FREQ = 17500;
-    const FREQ_0 = 18500;
-    const FREQ_1 = 19500;
-    const STOP_FREQ = 20500;
+    // Ultrasonic Frequencies
+    const FREQ_SYNC = 17500;
+    const FREQ_0 = 18600;
+    const FREQ_1 = 19600;
+    const FREQ_STOP = 20600;
 
-    const BIT_MS = 60;
-    const PREAMBLE_MS = 250;
-    const STOP_MS = 150;
+    const BIT_MS = 80;        // 80ms per bit for 100% reliability
+    const SYNC_MS = 300;      // 300ms wake-up chirp
+    const THRESHOLD = 35;     // Sensitivity threshold (out of 255)
 
     let audioCtx, analyser, dataArray;
     let state = "IDLE";
     let bitStream = [];
-    let sampleTimer = null;
     let isTransmitting = false;
 
     async function initAudio() {
-      const statusEl = document.getElementById('status');
-      
       try {
-        // 1. Check for HTTPS / Secure Context
-        if (!window.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
-          throw new Error("SECURITY ERROR: Mobile browsers disable the mic unless the URL is HTTPS! See below for the fix.");
-        }
-
-        // 2. Check for getUserMedia support
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          throw new Error("Microphone API not supported or blocked on this page context.");
-        }
-
-        statusEl.innerText = "Requesting microphone permission...";
-
-        // 3. Initialize AudioContext (Handles iOS and Android)
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
         audioCtx = new AudioContextClass();
-        if (audioCtx.state === 'suspended') {
-          await audioCtx.resume();
-        }
+        if (audioCtx.state === 'suspended') await audioCtx.resume();
 
-        // 4. Request mic stream
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        // Disable browser speech filtering so ultrasound isn't deleted!
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false
+          }
+        });
+
         const source = audioCtx.createMediaStreamSource(stream);
-
         analyser = audioCtx.createAnalyser();
         analyser.fftSize = 2048;
         source.connect(analyser);
@@ -142,64 +146,74 @@
         dataArray = new Uint8Array(analyser.frequencyBinCount);
 
         document.getElementById('startBtn').style.display = 'none';
+        document.getElementById('meter-container').style.display = 'block';
         document.getElementById('chat-container').style.display = 'flex';
-        statusEl.innerText = "Status: Listening silently for ultrasound...";
-        statusEl.style.color = "#3fb950";
+        document.getElementById('status').innerText = "Status: Listening for silent ultrasound...";
 
-        requestAnimationFrame(listenLoop);
-
+        requestAnimationFrame(updateLoop);
       } catch (err) {
-        statusEl.innerText = "ERROR: " + err.message;
-        statusEl.style.color = "#ff7b72";
-        alert(err.message);
+        alert("Audio Init Error: " + err.message);
       }
     }
 
-    // --- RECEIVER LOGIC ---
     function getMag(freq) {
       const nyquist = audioCtx.sampleRate / 2;
       const bin = Math.round((freq / nyquist) * analyser.frequencyBinCount);
       return (dataArray[bin - 1] + dataArray[bin] + dataArray[bin + 1]) / 3;
     }
 
-    function listenLoop() {
+    function updateLoop() {
       analyser.getByteFrequencyData(dataArray);
 
-      if (!isTransmitting) {
-        const preambleMag = getMag(PREAMBLE_FREQ);
-        const stopMag = getMag(STOP_FREQ);
+      const syncMag = getMag(FREQ_SYNC);
+      const stopMag = getMag(FREQ_STOP);
+      const maxUltrasound = Math.max(syncMag, getMag(FREQ_0), getMag(FREQ_1), stopMag);
 
-        if (state === "IDLE" && preambleMag > 130) {
-          state = "PREAMBLE_DETECTED";
-          document.getElementById('status').innerText = "Status: Receiving incoming signal...";
+      // Update live visual meter
+      const bar = document.getElementById('signal-bar');
+      bar.style.width = Math.min(100, (maxUltrasound / 150) * 100) + "%";
+
+      if (!isTransmitting) {
+        if (state === "IDLE" && syncMag > THRESHOLD) {
+          state = "SYNCED";
+          document.getElementById('status').innerText = "Status: Receiving signal...";
           bitStream = [];
 
+          // Wait for SYNC tone to finish + reach center of 1st bit
           setTimeout(() => {
             state = "RECEIVING";
-            sampleTimer = setInterval(sampleBit, BIT_MS);
-          }, PREAMBLE_MS + 60);
-        } else if (state === "RECEIVING" && stopMag > 130) {
-          finishReceiving();
+            startSampling();
+          }, SYNC_MS + (BIT_MS / 2));
         }
       }
 
-      requestAnimationFrame(listenLoop);
+      requestAnimationFrame(updateLoop);
     }
 
-    function sampleBit() {
-      const bit = getMag(FREQ_1) > getMag(FREQ_0) ? 1 : 0;
-      bitStream.push(bit);
+    function startSampling() {
+      const timer = setInterval(() => {
+        const stopMag = getMag(FREQ_STOP);
+        const mag0 = getMag(FREQ_0);
+        const mag1 = getMag(FREQ_1);
+
+        if (stopMag > THRESHOLD && stopMag > mag0 && stopMag > mag1) {
+          clearInterval(timer);
+          finishMessage();
+          return;
+        }
+
+        bitStream.push(mag1 > mag0 ? 1 : 0);
+      }, BIT_MS);
     }
 
-    function finishReceiving() {
-      clearInterval(sampleTimer);
+    function finishMessage() {
       state = "IDLE";
-      document.getElementById('status').innerText = "Status: Listening silently...";
+      document.getElementById('status').innerText = "Status: Listening for silent ultrasound...";
 
-      let binStr = bitStream.join('');
+      let binary = bitStream.join('');
       let text = "";
-      for (let i = 0; i + 8 <= binStr.length; i += 8) {
-        text += String.fromCharCode(parseInt(binStr.substr(i, 8), 2));
+      for (let i = 0; i + 8 <= binary.length; i += 8) {
+        text += String.fromCharCode(parseInt(binary.substr(i, 8), 2));
       }
 
       if (text.length > 0) {
@@ -207,7 +221,6 @@
       }
     }
 
-    // --- TRANSMITTER LOGIC ---
     function appendChat(text, type) {
       const box = document.getElementById('chatbox');
       const div = document.createElement('div');
@@ -217,23 +230,8 @@
       box.scrollTop = box.scrollHeight;
     }
 
-    function generateToneBuffer(freq, durationMs) {
-      const sampleRate = audioCtx.sampleRate;
-      const samples = Math.floor(sampleRate * (durationMs / 1000));
-      const buffer = audioCtx.createBuffer(1, samples, sampleRate);
-      const data = buffer.getChannelData(0);
-      const rampLen = Math.floor(sampleRate * 0.005);
-
-      for (let i = 0; i < samples; i++) {
-        let env = 1;
-        if (i < rampLen) env = 0.5 * (1 - Math.cos((Math.PI * i) / rampLen));
-        else if (i > samples - rampLen) env = 0.5 * (1 - Math.cos((Math.PI * (samples - i)) / rampLen));
-        data[i] = 0.7 * env * Math.sin(2 * Math.PI * freq * (i / sampleRate));
-      }
-      return buffer;
-    }
-
-    async function sendMessage() {
+    // --- ONE CONTINUOUS SOUND BUFFER TRANSMITTER ---
+    function sendMessage() {
       const input = document.getElementById('textInput');
       const text = input.value.trim();
       if (!text || isTransmitting) return;
@@ -249,32 +247,52 @@
         for (let char of b) bits.push(parseInt(char));
       }
 
-      let startTime = audioCtx.currentTime + 0.05;
+      const sampleRate = audioCtx.sampleRate;
+      const syncSamples = Math.floor(sampleRate * (SYNC_MS / 1000));
+      const bitSamples = Math.floor(sampleRate * (BIT_MS / 1000));
+      const stopSamples = Math.floor(sampleRate * (150 / 1000));
+      const totalSamples = syncSamples + (bits.length * bitSamples) + stopSamples;
 
-      function playBuffer(buf, time) {
-        const src = audioCtx.createBufferSource();
-        src.buffer = buf;
-        src.connect(audioCtx.destination);
-        src.start(time);
+      // Create a single monolithic audio buffer
+      const buffer = audioCtx.createBuffer(1, totalSamples, sampleRate);
+      const data = buffer.getChannelData(0);
+
+      // Helper to write smooth sine tones
+      let offset = 0;
+      function writeTone(freq, numSamples) {
+        const ramp = Math.min(100, Math.floor(numSamples * 0.1));
+        for (let i = 0; i < numSamples; i++) {
+          let env = 1;
+          if (i < ramp) env = i / ramp;
+          else if (i > numSamples - ramp) env = (numSamples - i) / ramp;
+          data[offset + i] = 0.8 * env * Math.sin(2 * Math.PI * freq * (i / sampleRate));
+        }
+        offset += numSamples;
       }
 
-      playBuffer(generateToneBuffer(PREAMBLE_FREQ, PREAMBLE_MS), startTime);
-      startTime += (PREAMBLE_MS + 30) / 1000;
+      // 1. Write Sync tone
+      writeTone(FREQ_SYNC, syncSamples);
 
+      // 2. Write all Data bits continuously
       for (let bit of bits) {
-        const freq = (bit === 1) ? FREQ_1 : FREQ_0;
-        playBuffer(generateToneBuffer(freq, BIT_MS), startTime);
-        startTime += BIT_MS / 1000;
+        writeTone(bit === 1 ? FREQ_1 : FREQ_0, bitSamples);
       }
 
-      playBuffer(generateToneBuffer(STOP_FREQ, STOP_MS), startTime);
-      startTime += STOP_MS / 1000;
+      // 3. Write Stop tone
+      writeTone(FREQ_STOP, stopSamples);
 
-      const totalWait = (startTime - audioCtx.currentTime) * 1000;
-      setTimeout(() => {
-        isTransmitting = false;
-        document.getElementById('status').innerText = "Status: Listening silently...";
-      }, totalWait + 200);
+      // Play the full audio buffer in one shot
+      const source = audioCtx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audioCtx.destination);
+      source.start();
+
+      source.onended = () => {
+        setTimeout(() => {
+          isTransmitting = false;
+          document.getElementById('status').innerText = "Status: Listening for silent ultrasound...";
+        }, 300);
+      };
     }
   </script>
 </body>
