@@ -107,15 +107,15 @@
   </div>
 
   <script>
-    // Ultrasonic Frequencies
+    // Clean, spaced-out acoustic frequencies
     const FREQ_SYNC = 16000;
     const FREQ_0    = 16900;
-    const FREQ_1    = 17900;
+    const FREQ_1    = 17800;
 
     const TONE_MS   = 65;      // 65ms tone
-    const GAP_MS    = 30;      // 30ms guard silence
-    const BIT_MS    = TONE_MS + GAP_MS; // 95ms per bit
-    const SYNC_MS   = 350;     // Wake-up carrier
+    const GAP_MS    = 30;      // 30ms silence gap
+    const BIT_MS    = TONE_MS + GAP_MS; // 95ms total
+    const SYNC_MS   = 350;
 
     let audioCtx, analyser, dataArray;
     let state = "IDLE";
@@ -180,19 +180,17 @@
 
       if (!isTransmitting) {
         if (state === "IDLE") {
-          // Detect SYNC tone
-          if (syncMag > 45 && syncMag > (mag0 + 15) && syncMag > (mag1 + 15)) {
+          // Detect SYNC tone clearly above data frequencies
+          if (syncMag > 40 && syncMag > (mag0 + 12) && syncMag > (mag1 + 12)) {
             state = "SYNCED";
             document.getElementById('status').innerText = "Status: Receiving incoming transmission...";
             
-            // Measure baseline background noise
             noise0 = mag0;
             noise1 = mag1;
             rxBits = [];
             lastSampledIndex = -1;
-            totalBitsToReceive = 0; // will be determined by 6-bit length header
+            totalBitsToReceive = 0;
 
-            // Schedule start right after SYNC + guard gap
             rxStartTime = now + SYNC_MS + 40;
             state = "RECEIVING";
           }
@@ -202,23 +200,22 @@
             const bitIndex = Math.floor(elapsed / BIT_MS);
             const timeInWindow = elapsed % BIT_MS;
 
-            // Sample at the center of the tone window (between 25ms and 50ms)
+            // Sample right in the sweet spot (middle of tone)
             if (bitIndex > lastSampledIndex && timeInWindow >= 25 && timeInWindow <= 55) {
               lastSampledIndex = bitIndex;
 
-              // Normalized delta to compensate for speaker roll-off
               const delta0 = getMag(FREQ_0) - noise0;
-              const delta1 = (getMag(FREQ_1) - noise1) * 1.3; // 1.3x boost for higher freq
+              const delta1 = getMag(FREQ_1) - noise1;
 
+              // Fair 50/50 comparison (no artificial 1.3x bias)
               rxBits.push(delta1 > delta0 ? 1 : 0);
 
-              // Once first 6 bits arrive, read the packet length!
+              // First 6 bits determine the exact length
               if (rxBits.length === 6 && totalBitsToReceive === 0) {
                 const charCount = parseInt(rxBits.join(''), 2);
                 if (charCount > 0 && charCount <= 30) {
                   totalBitsToReceive = 6 + (charCount * 8);
                 } else {
-                  // Corrupt header fallback
                   resetReceiver();
                 }
               }
@@ -229,7 +226,6 @@
               }
             }
 
-            // Safety timeout after 10 seconds
             if (elapsed > 10000) {
               resetReceiver();
             }
@@ -249,7 +245,7 @@
       state = "IDLE";
       document.getElementById('status').innerText = "Status: Listening silently...";
 
-      const payloadBits = rxBits.slice(6); // Skip the 6-bit length header
+      const payloadBits = rxBits.slice(6);
       let text = "";
       for (let i = 0; i + 8 <= payloadBits.length; i += 8) {
         let byte = payloadBits.slice(i, i + 8).join('');
@@ -281,12 +277,12 @@
       isTransmitting = true;
       document.getElementById('status').innerText = "Status: Transmitting silently...";
 
-      // 1. First 6 bits: message length
+      // 6 bits length header
       let bits = [];
       const lenBinary = text.length.toString(2).padStart(6, '0');
       for (let b of lenBinary) bits.push(parseInt(b));
 
-      // 2. Data bits
+      // Data bits
       for (let i = 0; i < text.length; i++) {
         let b = text.charCodeAt(i).toString(2).padStart(8, '0');
         for (let char of b) bits.push(parseInt(char));
@@ -303,13 +299,14 @@
       const data = buffer.getChannelData(0);
 
       let offset = 0;
-      function appendTone(freq, numSamples, volumeMultiplier = 1.0) {
-        const ramp = Math.min(100, Math.floor(numSamples * 0.15)); // smooth cosine taper
+      function appendTone(freq, numSamples) {
+        const ramp = Math.min(100, Math.floor(numSamples * 0.15));
         for (let i = 0; i < numSamples; i++) {
           let env = 1;
           if (i < ramp) env = 0.5 * (1 - Math.cos((Math.PI * i) / ramp));
           else if (i > numSamples - ramp) env = 0.5 * (1 - Math.cos((Math.PI * (numSamples - i)) / ramp));
-          data[offset + i] = 0.85 * volumeMultiplier * env * Math.sin(2 * Math.PI * freq * (i / sampleRate));
+          // Clean 0.65 master gain to prevent speaker clipping
+          data[offset + i] = 0.65 * env * Math.sin(2 * Math.PI * freq * (i / sampleRate));
         }
         offset += numSamples;
       }
@@ -318,17 +315,11 @@
         offset += numSamples;
       }
 
-      // Play Sync Tone + 40ms silence
-      appendTone(FREQ_SYNC, syncSamples, 1.0);
+      appendTone(FREQ_SYNC, syncSamples);
       appendSilence(postSyncGap);
 
-      // Play all bits with frequency equalization (boost FREQ_1 by 1.25x for speaker drop-off)
       for (let bit of bits) {
-        if (bit === 1) {
-          appendTone(FREQ_1, toneSamples, 1.25);
-        } else {
-          appendTone(FREQ_0, toneSamples, 0.95);
-        }
+        appendTone(bit === 1 ? FREQ_1 : FREQ_0, toneSamples);
         appendSilence(gapSamples);
       }
 
