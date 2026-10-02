@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Acoustic AirDrop (Near-Ultrasound)</title>
-  <!-- Load ggwave engine: includes FSK modulation + Reed-Solomon Error Correction -->
+  <!-- Load ggwave official WASM/JS library -->
   <script src="https://cdn.jsdelivr.net/npm/ggwave@0.4.0/ggwave.min.js"></script>
   <style>
     * { box-sizing: border-box; }
@@ -81,7 +81,7 @@
 <body>
 
   <h2>ACOUSTIC AIRDROP</h2>
-  <div id="status">Standby: Tap Start to enable microphone and speaker</div>
+  <div id="status">Standby: Tap Start to enable microphone and speaker - v2</div>
   <button id="startBtn" onclick="initAcousticChat()">START CHAT</button>
 
   <div id="chat-container">
@@ -93,7 +93,8 @@
   </div>
 
   <script>
-    let ggwaveInstance = null;
+    let ggwave = null;
+    let instance = null;
     let audioCtx = null;
     let isTransmitting = false;
 
@@ -103,15 +104,16 @@
         audioCtx = new AudioContextClass({ sampleRate: 48000 });
         if (audioCtx.state === 'suspended') await audioCtx.resume();
 
-        // 1. Initialize ggwave WebAssembly instance
-        const factory = await ggwave_factory();
-        ggwaveInstance = factory.ggwave;
-        ggwaveInstance.init({
-          sampleRateInp: audioCtx.sampleRate,
-          sampleRateOut: audioCtx.sampleRate
-        });
+        // 1. Initialize ggwave WASM factory correctly
+        ggwave = await ggwave_factory();
 
-        // 2. Request clean microphone input without OS speech filters
+        // 2. Configure ggwave parameters for continuous RX & TX
+        const parameters = ggwave.getDefaultParameters();
+        parameters.sampleRateInp = audioCtx.sampleRate;
+        parameters.sampleRateOut = audioCtx.sampleRate;
+        instance = ggwave.init(parameters);
+
+        // 3. Request raw audio without OS speech/noise filtering
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: false,
@@ -120,36 +122,37 @@
           }
         });
 
-        // 3. Connect microphone to ScriptProcessor (continuous sample ingestion)
+        // 4. Create real-time audio pipeline
         const source = audioCtx.createMediaStreamSource(stream);
-        const recorder = audioCtx.createScriptProcessor(2048, 1, 1);
+        const recorder = audioCtx.createScriptProcessor(1024, 1, 1);
 
         recorder.onaudioprocess = (e) => {
-          if (isTransmitting || !ggwaveInstance) return;
+          if (isTransmitting || !instance) return;
           const inputData = e.inputBuffer.getChannelData(0);
 
-          // Decode raw audio continuous stream
-          const res = ggwaveInstance.decode(inputData);
+          // Feed float samples to ggwave decoder
+          const res = ggwave.decode(instance, inputData);
           if (res && res.length > 0) {
             appendChat(res, 'incoming');
           }
         };
 
         source.connect(recorder);
-        recorder.connect(audioCtx.destination); // Required by web audio to keep the pipe alive
+        recorder.connect(audioCtx.destination); // Keeps audio pipeline active
 
         document.getElementById('startBtn').style.display = 'none';
         document.getElementById('chat-container').style.display = 'flex';
         document.getElementById('status').innerText = "Status: Listening (Near-Ultrasound band)...";
       } catch (err) {
         alert("Initialization error: " + err.message);
+        console.error(err);
       }
     }
 
     function sendMessage() {
       const input = document.getElementById('textInput');
       const text = input.value.trim();
-      if (!text || isTransmitting || !ggwaveInstance) return;
+      if (!text || isTransmitting || !instance) return;
 
       input.value = "";
       appendChat(text, 'outgoing');
@@ -157,14 +160,12 @@
       const sendBtn = document.getElementById('sendBtn');
       sendBtn.disabled = true;
       isTransmitting = true;
-      document.getElementById('status').innerText = "Status: Sending silent acoustic packet...";
+      document.getElementById('status').innerText = "Status: Transmitting silently...";
 
-      // GGWAVE_TX_PROTOCOL_ULTRASOUND_FAST:
-      // Uses near-ultrasound (15kHz - 17kHz). Inaudible to most adults,
-      // yet within hardware capabilities of modern phone mics & speakers.
-      const protocolId = ggwaveInstance.TxProtocolId.GGWAVE_TX_PROTOCOL_ULTRASOUND_FAST;
-      const volume = 25; // 0 to 100
-      const waveform = ggwaveInstance.encode(text, protocolId, volume);
+      // Near-Ultrasound protocol (~15kHz-17kHz): inaudible to most adults and soft to hear
+      const protocolId = ggwave.TxProtocolId.GGWAVE_TX_PROTOCOL_ULTRASOUND_FAST;
+      const volume = 20; // Soft level, enough for room range without speaker clipping
+      const waveform = ggwave.encode(instance, text, protocolId, volume);
 
       if (!waveform) {
         alert("Encoding failed");
@@ -173,13 +174,12 @@
         return;
       }
 
-      // Convert Int16Array from ggwave to Web Audio Float32Array
+      // Convert ggwave Int16Array to Web Audio Float32Array
       const floatData = new Float32Array(waveform.length);
       for (let i = 0; i < waveform.length; i++) {
         floatData[i] = waveform[i] / 32768.0;
       }
 
-      // Play audio packet
       const audioBuffer = audioCtx.createBuffer(1, floatData.length, audioCtx.sampleRate);
       audioBuffer.copyToChannel(floatData, 0);
 
@@ -188,7 +188,7 @@
       bufferSource.connect(audioCtx.destination);
 
       bufferSource.onended = () => {
-        // Small guard time to let room reverberations decay
+        // Guard interval to let speaker echoes settle down before re-enabling mic
         setTimeout(() => {
           isTransmitting = false;
           sendBtn.disabled = false;
