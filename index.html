@@ -53,7 +53,7 @@
     }
     #chatbox {
       width: 100%;
-      height: 250px;
+      height: 260px;
       background: #161b22;
       border: 1px solid #30363d;
       border-radius: 8px;
@@ -90,11 +90,11 @@
 <body>
 
   <h2>ACOUSTIC AIRDROP</h2>
-  <div id="status">Standby: Tap Start - v3</div>
+  <div id="status">Standby: Tap Start - v4</div>
   <button id="startBtn" onclick="initAudio()">START AIRDROP</button>
 
   <div id="meter-container">
-    <div class="meter-label">Live Signal Power:</div>
+    <div class="meter-label">Live Ultrasonic Signal Power:</div>
     <div class="bar-bg"><div id="signal-bar"></div></div>
   </div>
 
@@ -107,15 +107,16 @@
   </div>
 
   <script>
-    // 10x stronger near-ultrasonic frequencies
-    const FREQ_SYNC = 15000;
-    const FREQ_0    = 15800;
-    const FREQ_1    = 16600;
-    const FREQ_STOP = 17400;
+    // Ultrasonic inaudible band (spaced out by 700Hz to prevent bleed)
+    const FREQ_SYNC = 17500;
+    const FREQ_0    = 18200;
+    const FREQ_1    = 18900;
+    const FREQ_STOP = 19600;
 
-    const BIT_MS = 100;       // 100ms per bit: rock-solid accuracy
-    const SYNC_MS = 350;      // 350ms wake-up carrier
-    const MIN_POWER = 40;     // Minimum power to accept a signal
+    const TONE_MS   = 60;      // 60ms tone burst
+    const GAP_MS    = 30;      // 30ms guard silence to kill echo
+    const SYMBOL_MS = TONE_MS + GAP_MS; // 90ms total per bit
+    const SYNC_MS   = 300;     // 300ms wake-up carrier
 
     let audioCtx, analyser, dataArray;
     let state = "IDLE";
@@ -159,7 +160,6 @@
       return (dataArray[bin - 1] + dataArray[bin] + dataArray[bin + 1]) / 3;
     }
 
-    let rxStartTime = 0;
     let rxBits = [];
     let rxTimer = null;
 
@@ -172,20 +172,20 @@
       const stopMag = getMag(FREQ_STOP);
       const maxPower = Math.max(syncMag, mag0, mag1, stopMag);
 
-      // Update signal bar
+      // Visual meter updates only when listening (not transmitting)
       const bar = document.getElementById('signal-bar');
-      bar.style.width = Math.min(100, (maxPower / 160) * 100) + "%";
+      bar.style.width = isTransmitting ? "0%" : Math.min(100, (maxPower / 120) * 100) + "%";
 
       if (!isTransmitting && state === "IDLE") {
-        if (syncMag > 60 && syncMag > (mag0 + 15) && syncMag > (mag1 + 15)) {
+        // Trigger SYNC if clearly louder than data tones
+        if (syncMag > 35 && syncMag > (mag0 + 15) && syncMag > (mag1 + 15)) {
           state = "SYNCED";
-          document.getElementById('status').innerText = "Status: Receiving incoming signal...";
+          document.getElementById('status').innerText = "Status: Receiving signal...";
           rxBits = [];
 
-          // Wall-clock timing: sample at exact timestamps
+          // Wait for SYNC to end + sample at the center of the first tone burst
           setTimeout(() => {
             state = "RECEIVING";
-            rxStartTime = performance.now();
             let bitCount = 0;
 
             rxTimer = setInterval(() => {
@@ -193,25 +193,23 @@
               const m0 = getMag(FREQ_0);
               const m1 = getMag(FREQ_1);
 
-              // Stop tone detected
-              if (currentStop > 50 && currentStop > m0 && currentStop > m1) {
+              // Stop Tone Check
+              if (currentStop > 30 && currentStop > m0 && currentStop > m1) {
                 clearInterval(rxTimer);
                 finishReceive();
                 return;
               }
 
-              // Only accept bit if power exceeds floor
-              if (Math.max(m0, m1) > MIN_POWER) {
-                rxBits.push(m1 > m0 ? 1 : 0);
-              }
-
+              // Bit Decision: higher energy wins
+              rxBits.push(m1 > m0 ? 1 : 0);
               bitCount++;
-              if (bitCount > 120) { // Safety timeout after 15 characters
+
+              if (bitCount > 100) { // Safety cutoff
                 clearInterval(rxTimer);
                 finishReceive();
               }
-            }, BIT_MS);
-          }, SYNC_MS + 20);
+            }, SYMBOL_MS);
+          }, SYNC_MS + 25);
         }
       }
 
@@ -226,10 +224,9 @@
       let text = "";
       for (let i = 0; i + 8 <= binStr.length; i += 8) {
         let byte = binStr.substr(i, 8);
-        let charCode = parseInt(byte, 2);
-        // Only accept printable ASCII
-        if (charCode >= 32 && charCode <= 126) {
-          text += String.fromCharCode(charCode);
+        let code = parseInt(byte, 2);
+        if (code >= 32 && code <= 126) {
+          text += String.fromCharCode(code);
         }
       }
 
@@ -247,7 +244,7 @@
       box.scrollTop = box.scrollHeight;
     }
 
-    // --- CONTINUOUS TRANSMISSION BUFFER ---
+    // --- TRANSMITTER ---
     function sendMessage() {
       const input = document.getElementById('textInput');
       const text = input.value.trim();
@@ -265,31 +262,42 @@
       }
 
       const sampleRate = audioCtx.sampleRate;
-      const syncSamples = Math.floor(sampleRate * (SYNC_MS / 1000));
-      const bitSamples  = Math.floor(sampleRate * (BIT_MS / 1000));
-      const stopSamples = Math.floor(sampleRate * (0.20)); // 200ms stop
-      const totalSamples = syncSamples + (bits.length * bitSamples) + stopSamples;
+      const syncSamples  = Math.floor(sampleRate * (SYNC_MS / 1000));
+      const toneSamples  = Math.floor(sampleRate * (TONE_MS / 1000));
+      const gapSamples   = Math.floor(sampleRate * (GAP_MS / 1000));
+      const stopSamples  = Math.floor(sampleRate * (0.15));
 
+      const totalSamples = syncSamples + (bits.length * (toneSamples + gapSamples)) + stopSamples;
       const buffer = audioCtx.createBuffer(1, totalSamples, sampleRate);
       const data = buffer.getChannelData(0);
 
       let offset = 0;
-      function writeTone(freq, numSamples) {
-        const ramp = Math.min(120, Math.floor(numSamples * 0.08));
+      function appendTone(freq, numSamples) {
+        const ramp = Math.min(80, Math.floor(numSamples * 0.1));
         for (let i = 0; i < numSamples; i++) {
           let env = 1;
           if (i < ramp) env = i / ramp;
           else if (i > numSamples - ramp) env = (numSamples - i) / ramp;
-          data[offset + i] = 0.85 * env * Math.sin(2 * Math.PI * freq * (i / sampleRate));
+          data[offset + i] = 0.9 * env * Math.sin(2 * Math.PI * freq * (i / sampleRate));
         }
         offset += numSamples;
       }
 
-      writeTone(FREQ_SYNC, syncSamples);
-      for (let bit of bits) {
-        writeTone(bit === 1 ? FREQ_1 : FREQ_0, bitSamples);
+      function appendSilence(numSamples) {
+        offset += numSamples; // buffer is already 0.0
       }
-      writeTone(FREQ_STOP, stopSamples);
+
+      // 1. Play Sync Tone
+      appendTone(FREQ_SYNC, syncSamples);
+
+      // 2. Play each bit followed by a small silence gap
+      for (let bit of bits) {
+        appendTone(bit === 1 ? FREQ_1 : FREQ_0, toneSamples);
+        appendSilence(gapSamples);
+      }
+
+      // 3. Play Stop Tone
+      appendTone(FREQ_STOP, stopSamples);
 
       const source = audioCtx.createBufferSource();
       source.buffer = buffer;
@@ -300,7 +308,7 @@
         setTimeout(() => {
           isTransmitting = false;
           document.getElementById('status').innerText = "Status: Listening silently...";
-        }, 300);
+        }, 200);
       };
     }
   </script>
