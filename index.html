@@ -19,7 +19,6 @@
     h2 { color: #f0f6fc; margin: 10px 0; }
     #status { color: #8b949e; margin-bottom: 10px; font-size: 13px; text-align: center; }
     
-    /* Live Signal Meter */
     #meter-container {
       width: 100%;
       max-width: 400px;
@@ -31,7 +30,7 @@
       display: none;
     }
     .meter-label { font-size: 11px; color: #8b949e; margin-bottom: 4px; }
-    .bar-bg { background: #21262d; height: 10px; border-radius: 5px; overflow: hidden; }
+    .bar-bg { background: #21262d; height: 12px; border-radius: 6px; overflow: hidden; }
     #signal-bar { width: 0%; height: 100%; background: #3fb950; transition: width 0.05s; }
 
     #startBtn {
@@ -91,36 +90,35 @@
 <body>
 
   <h2>ACOUSTIC AIRDROP</h2>
-  <div id="status">Standby: Tap Start to activate mic & audio - v2</div>
+  <div id="status">Standby: Tap Start - v3</div>
   <button id="startBtn" onclick="initAudio()">START AIRDROP</button>
 
   <div id="meter-container">
-    <div class="meter-label">Live Ultrasonic Signal Strength:</div>
+    <div class="meter-label">Live Signal Power:</div>
     <div class="bar-bg"><div id="signal-bar"></div></div>
   </div>
 
   <div id="chat-container">
     <div id="chatbox"></div>
     <div class="input-row">
-      <input id="textInput" type="text" placeholder="Type message..." />
+      <input id="textInput" type="text" placeholder="Type message (e.g. hi)..." />
       <button id="sendBtn" onclick="sendMessage()">SEND</button>
     </div>
   </div>
 
   <script>
-    // Ultrasonic Frequencies
-    const FREQ_SYNC = 17500;
-    const FREQ_0 = 18600;
-    const FREQ_1 = 19600;
-    const FREQ_STOP = 20600;
+    // 10x stronger near-ultrasonic frequencies
+    const FREQ_SYNC = 15000;
+    const FREQ_0    = 15800;
+    const FREQ_1    = 16600;
+    const FREQ_STOP = 17400;
 
-    const BIT_MS = 80;        // 80ms per bit for 100% reliability
-    const SYNC_MS = 300;      // 300ms wake-up chirp
-    const THRESHOLD = 35;     // Sensitivity threshold (out of 255)
+    const BIT_MS = 100;       // 100ms per bit: rock-solid accuracy
+    const SYNC_MS = 350;      // 350ms wake-up carrier
+    const MIN_POWER = 40;     // Minimum power to accept a signal
 
     let audioCtx, analyser, dataArray;
     let state = "IDLE";
-    let bitStream = [];
     let isTransmitting = false;
 
     async function initAudio() {
@@ -129,7 +127,6 @@
         audioCtx = new AudioContextClass();
         if (audioCtx.state === 'suspended') await audioCtx.resume();
 
-        // Disable browser speech filtering so ultrasound isn't deleted!
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: false,
@@ -148,9 +145,9 @@
         document.getElementById('startBtn').style.display = 'none';
         document.getElementById('meter-container').style.display = 'block';
         document.getElementById('chat-container').style.display = 'flex';
-        document.getElementById('status').innerText = "Status: Listening for silent ultrasound...";
+        document.getElementById('status').innerText = "Status: Listening silently...";
 
-        requestAnimationFrame(updateLoop);
+        requestAnimationFrame(listenLoop);
       } catch (err) {
         alert("Audio Init Error: " + err.message);
       }
@@ -162,58 +159,78 @@
       return (dataArray[bin - 1] + dataArray[bin] + dataArray[bin + 1]) / 3;
     }
 
-    function updateLoop() {
+    let rxStartTime = 0;
+    let rxBits = [];
+    let rxTimer = null;
+
+    function listenLoop() {
       analyser.getByteFrequencyData(dataArray);
 
       const syncMag = getMag(FREQ_SYNC);
+      const mag0    = getMag(FREQ_0);
+      const mag1    = getMag(FREQ_1);
       const stopMag = getMag(FREQ_STOP);
-      const maxUltrasound = Math.max(syncMag, getMag(FREQ_0), getMag(FREQ_1), stopMag);
+      const maxPower = Math.max(syncMag, mag0, mag1, stopMag);
 
-      // Update live visual meter
+      // Update signal bar
       const bar = document.getElementById('signal-bar');
-      bar.style.width = Math.min(100, (maxUltrasound / 150) * 100) + "%";
+      bar.style.width = Math.min(100, (maxPower / 160) * 100) + "%";
 
-      if (!isTransmitting) {
-        if (state === "IDLE" && syncMag > THRESHOLD) {
+      if (!isTransmitting && state === "IDLE") {
+        if (syncMag > 60 && syncMag > (mag0 + 15) && syncMag > (mag1 + 15)) {
           state = "SYNCED";
-          document.getElementById('status').innerText = "Status: Receiving signal...";
-          bitStream = [];
+          document.getElementById('status').innerText = "Status: Receiving incoming signal...";
+          rxBits = [];
 
-          // Wait for SYNC tone to finish + reach center of 1st bit
+          // Wall-clock timing: sample at exact timestamps
           setTimeout(() => {
             state = "RECEIVING";
-            startSampling();
-          }, SYNC_MS + (BIT_MS / 2));
+            rxStartTime = performance.now();
+            let bitCount = 0;
+
+            rxTimer = setInterval(() => {
+              const currentStop = getMag(FREQ_STOP);
+              const m0 = getMag(FREQ_0);
+              const m1 = getMag(FREQ_1);
+
+              // Stop tone detected
+              if (currentStop > 50 && currentStop > m0 && currentStop > m1) {
+                clearInterval(rxTimer);
+                finishReceive();
+                return;
+              }
+
+              // Only accept bit if power exceeds floor
+              if (Math.max(m0, m1) > MIN_POWER) {
+                rxBits.push(m1 > m0 ? 1 : 0);
+              }
+
+              bitCount++;
+              if (bitCount > 120) { // Safety timeout after 15 characters
+                clearInterval(rxTimer);
+                finishReceive();
+              }
+            }, BIT_MS);
+          }, SYNC_MS + 20);
         }
       }
 
-      requestAnimationFrame(updateLoop);
+      requestAnimationFrame(listenLoop);
     }
 
-    function startSampling() {
-      const timer = setInterval(() => {
-        const stopMag = getMag(FREQ_STOP);
-        const mag0 = getMag(FREQ_0);
-        const mag1 = getMag(FREQ_1);
-
-        if (stopMag > THRESHOLD && stopMag > mag0 && stopMag > mag1) {
-          clearInterval(timer);
-          finishMessage();
-          return;
-        }
-
-        bitStream.push(mag1 > mag0 ? 1 : 0);
-      }, BIT_MS);
-    }
-
-    function finishMessage() {
+    function finishReceive() {
       state = "IDLE";
-      document.getElementById('status').innerText = "Status: Listening for silent ultrasound...";
+      document.getElementById('status').innerText = "Status: Listening silently...";
 
-      let binary = bitStream.join('');
+      let binStr = rxBits.join('');
       let text = "";
-      for (let i = 0; i + 8 <= binary.length; i += 8) {
-        text += String.fromCharCode(parseInt(binary.substr(i, 8), 2));
+      for (let i = 0; i + 8 <= binStr.length; i += 8) {
+        let byte = binStr.substr(i, 8);
+        let charCode = parseInt(byte, 2);
+        // Only accept printable ASCII
+        if (charCode >= 32 && charCode <= 126) {
+          text += String.fromCharCode(charCode);
+        }
       }
 
       if (text.length > 0) {
@@ -230,7 +247,7 @@
       box.scrollTop = box.scrollHeight;
     }
 
-    // --- ONE CONTINUOUS SOUND BUFFER TRANSMITTER ---
+    // --- CONTINUOUS TRANSMISSION BUFFER ---
     function sendMessage() {
       const input = document.getElementById('textInput');
       const text = input.value.trim();
@@ -249,39 +266,31 @@
 
       const sampleRate = audioCtx.sampleRate;
       const syncSamples = Math.floor(sampleRate * (SYNC_MS / 1000));
-      const bitSamples = Math.floor(sampleRate * (BIT_MS / 1000));
-      const stopSamples = Math.floor(sampleRate * (150 / 1000));
+      const bitSamples  = Math.floor(sampleRate * (BIT_MS / 1000));
+      const stopSamples = Math.floor(sampleRate * (0.20)); // 200ms stop
       const totalSamples = syncSamples + (bits.length * bitSamples) + stopSamples;
 
-      // Create a single monolithic audio buffer
       const buffer = audioCtx.createBuffer(1, totalSamples, sampleRate);
       const data = buffer.getChannelData(0);
 
-      // Helper to write smooth sine tones
       let offset = 0;
       function writeTone(freq, numSamples) {
-        const ramp = Math.min(100, Math.floor(numSamples * 0.1));
+        const ramp = Math.min(120, Math.floor(numSamples * 0.08));
         for (let i = 0; i < numSamples; i++) {
           let env = 1;
           if (i < ramp) env = i / ramp;
           else if (i > numSamples - ramp) env = (numSamples - i) / ramp;
-          data[offset + i] = 0.8 * env * Math.sin(2 * Math.PI * freq * (i / sampleRate));
+          data[offset + i] = 0.85 * env * Math.sin(2 * Math.PI * freq * (i / sampleRate));
         }
         offset += numSamples;
       }
 
-      // 1. Write Sync tone
       writeTone(FREQ_SYNC, syncSamples);
-
-      // 2. Write all Data bits continuously
       for (let bit of bits) {
         writeTone(bit === 1 ? FREQ_1 : FREQ_0, bitSamples);
       }
-
-      // 3. Write Stop tone
       writeTone(FREQ_STOP, stopSamples);
 
-      // Play the full audio buffer in one shot
       const source = audioCtx.createBufferSource();
       source.buffer = buffer;
       source.connect(audioCtx.destination);
@@ -290,7 +299,7 @@
       source.onended = () => {
         setTimeout(() => {
           isTransmitting = false;
-          document.getElementById('status').innerText = "Status: Listening for silent ultrasound...";
+          document.getElementById('status').innerText = "Status: Listening silently...";
         }, 300);
       };
     }
