@@ -3,9 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Acoustic AirDrop (Near-Ultrasound)</title>
-  <!-- Official ggwave WASM bundle -->
-  <script src="https://cdn.jsdelivr.net/npm/ggwave@0.4.0/ggwave.min.js"></script>
+  <title>Acoustic AirDrop</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -20,18 +18,33 @@
     }
     h2 { color: #f0f6fc; margin: 10px 0; }
     #status { color: #8b949e; margin-bottom: 12px; font-size: 13px; text-align: center; }
-    
+
+    #meter-box {
+      width: 100%;
+      max-width: 420px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 10px;
+      margin-bottom: 12px;
+      display: none;
+    }
+    .meter-label { font-size: 11px; color: #8b949e; margin-bottom: 5px; }
+    .bar-bg { background: #21262d; height: 10px; border-radius: 5px; overflow: hidden; }
+    #meter-fill { width: 0%; height: 100%; background: #238636; transition: width 0.05s linear; }
+
     #startBtn {
       background: #238636;
       color: #fff;
       border: none;
-      padding: 15px 30px;
+      padding: 14px 28px;
       font-size: 16px;
       border-radius: 8px;
       cursor: pointer;
       font-weight: bold;
       margin-bottom: 15px;
     }
+    #startBtn:active { transform: scale(0.98); }
 
     #chat-container {
       width: 100%;
@@ -55,7 +68,8 @@
     .msg { padding: 8px 12px; border-radius: 6px; max-width: 85%; font-size: 14px; word-break: break-all; }
     .incoming { background: #21262d; color: #3fb950; align-self: flex-start; }
     .outgoing { background: #1f6feb; color: #ffffff; align-self: flex-end; }
-    
+    .debug-msg { font-size: 11px; color: #f85149; align-self: center; }
+
     .input-row { display: flex; gap: 8px; }
     input {
       flex: 1;
@@ -81,43 +95,53 @@
 <body>
 
   <h2>ACOUSTIC AIRDROP</h2>
-  <div id="status">Standby: Tap Start to initialize</div>
-  <button id="startBtn" onclick="initAcousticChat()">START CHAT</button>
+  <div id="status">Standby: Tap Start to initialize audio hardware</div>
+  <button id="startBtn" onclick="initAcousticChat()">START AIRDROP</button>
+
+  <div id="meter-box">
+    <div class="meter-label">Live Ultrasonic Signal Power:</div>
+    <div class="bar-bg"><div id="meter-fill"></div></div>
+  </div>
 
   <div id="chat-container">
     <div id="chatbox"></div>
     <div class="input-row">
-      <input id="textInput" type="text" placeholder="Type message..." onkeydown="if(event.key==='Enter') sendMessage()" />
+      <input id="textInput" type="text" placeholder="Type message (e.g. hello)..." onkeydown="if(event.key==='Enter') sendMessage()" />
       <button id="sendBtn" onclick="sendMessage()">SEND</button>
     </div>
   </div>
 
   <script>
-    let ggwave = null;
-    let instance = null;
+    // --- Near-Ultrasound Frequency Band (Soft & Near-Silent) ---
+    const F_SYNC = 14800; // Preamble wake-up tone
+    // Bank A (used for even bits)
+    const F_0A   = 15300;
+    const F_1A   = 15700;
+    // Bank B (used for odd bits)
+    const F_0B   = 16100;
+    const F_1B   = 16500;
+    // End marker
+    const F_STOP = 16900;
+
     let audioCtx = null;
     let isTransmitting = false;
 
-    // Protocol 4 = Ultrasound Fast (~15.5 kHz - 17 kHz: virtually inaudible & reliable)
-    // Protocol 1 = Audible Fast (use for testing if speakers don't support near-ultrasound)
-    const PROTOCOL_ULTRASOUND_FAST = 4;
+    // Receiver State Machine
+    let rxState = "IDLE"; // "IDLE" | "WAIT_DATA" | "RECEIVING"
+    let syncStartTime = 0;
+    let rxBits = [];
+    let expectedLength = null;
+    let expectedTotalBits = null;
+    let currentBank = null;
+    let lastTransitionTime = 0;
 
     async function initAcousticChat() {
       try {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        audioCtx = new AudioContextClass({ sampleRate: 48000 });
+        audioCtx = new AudioContextClass();
         if (audioCtx.state === 'suspended') await audioCtx.resume();
 
-        // 1. Initialize WASM module
-        ggwave = await ggwave_factory();
-
-        // 2. Configure engine parameters
-        const parameters = ggwave.getDefaultParameters();
-        parameters.sampleRateInp = audioCtx.sampleRate;
-        parameters.sampleRateOut = audioCtx.sampleRate;
-        instance = ggwave.init(parameters);
-
-        // 3. Obtain microphone with browser DSP filters turned off
+        // Request clean mic stream without aggressive cancellation filters
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: false,
@@ -126,95 +150,310 @@
           }
         });
 
-        // 4. Capture pipeline
         const source = audioCtx.createMediaStreamSource(stream);
+        // ScriptProcessor provides raw, hardware-clocked sample frames (zero rAF jitter)
         const recorder = audioCtx.createScriptProcessor(1024, 1, 1);
 
-        recorder.onaudioprocess = (e) => {
-          if (isTransmitting || !instance) return;
-          const inputData = e.inputBuffer.getChannelData(0);
-
-          // Feed float audio samples to the decoder
-          const res = ggwave.decode(instance, inputData);
-          if (res && res.length > 0) {
-            appendChat(res, 'incoming');
-          }
-        };
-
+        recorder.onaudioprocess = handleAudioInput;
         source.connect(recorder);
         recorder.connect(audioCtx.destination);
 
         document.getElementById('startBtn').style.display = 'none';
+        document.getElementById('meter-box').style.display = 'block';
         document.getElementById('chat-container').style.display = 'flex';
-        document.getElementById('status').innerText = "Status: Listening (Near-Ultrasound band)...";
+        updateStatus("Listening silently on near-ultrasound band...");
       } catch (err) {
-        document.getElementById('status').innerText = "Error: " + err.message;
-        alert("Audio Init Error: " + err.message);
-        console.error(err);
+        alert("Microphone Init Failed: " + err.message);
+        updateStatus("Error: " + err.message);
       }
     }
 
+    // Goertzel Algorithm: High-speed single-frequency magnitude detector with Hann windowing
+    function goertzel(samples, targetFreq, sampleRate) {
+      const N = samples.length;
+      const k = Math.round((N * targetFreq) / sampleRate);
+      const omega = (2 * Math.PI * k) / N;
+      const coeff = 2 * Math.cos(omega);
+      let s_prev = 0;
+      let s_prev2 = 0;
+
+      for (let i = 0; i < N; i++) {
+        // Apply Hann window directly to prevent spectral leakage between frequency bins
+        const w = 0.5 * (1 - Math.cos((2 * Math.PI * i) / N));
+        const s = (samples[i] * w) + coeff * s_prev - s_prev2;
+        s_prev2 = s_prev;
+        s_prev = s;
+      }
+      const power = s_prev2 * s_prev2 + s_prev * s_prev - coeff * s_prev * s_prev2;
+      return Math.sqrt(Math.max(0, power)) / N;
+    }
+
+    // CRC-8 Implementation (Polynomial 0x07)
+    function computeCRC8(bytes) {
+      let crc = 0x00;
+      for (let i = 0; i < bytes.length; i++) {
+        crc ^= bytes[i];
+        for (let j = 0; j < 8; j++) {
+          if ((crc & 0x80) !== 0) {
+            crc = ((crc << 1) ^ 0x07) & 0xFF;
+          } else {
+            crc = (crc << 1) & 0xFF;
+          }
+        }
+      }
+      return crc;
+    }
+
+    function handleAudioInput(e) {
+      if (isTransmitting) return;
+
+      const samples = e.inputBuffer.getChannelData(0);
+      const sampleRate = audioCtx.sampleRate;
+
+      const magSync = goertzel(samples, F_SYNC, sampleRate);
+      const mag0A   = goertzel(samples, F_0A, sampleRate);
+      const mag1A   = goertzel(samples, F_1A, sampleRate);
+      const mag0B   = goertzel(samples, F_0B, sampleRate);
+      const mag1B   = goertzel(samples, F_1B, sampleRate);
+      const magStop = goertzel(samples, F_STOP, sampleRate);
+
+      const powerA = Math.max(mag0A, mag1A);
+      const powerB = Math.max(mag0B, mag1B);
+      const maxPower = Math.max(magSync, powerA, powerB, magStop);
+
+      // Update signal power visual bar
+      const bar = document.getElementById('meter-fill');
+      bar.style.width = Math.min(100, (maxPower / 0.05) * 100) + "%";
+
+      const now = performance.now();
+
+      if (rxState === "IDLE") {
+        // Detect wake-up SYNC tone
+        if (magSync > 0.008 && magSync > 2.5 * Math.max(powerA, powerB, magStop)) {
+          rxState = "WAIT_DATA";
+          syncStartTime = now;
+          rxBits = [];
+          expectedLength = null;
+          expectedTotalBits = null;
+          currentBank = null;
+          updateStatus("Signal detected! Synchronizing...");
+        }
+      } else if (rxState === "WAIT_DATA") {
+        // Allow the 200ms SYNC tone to settle
+        if (now - syncStartTime > 220) {
+          rxState = "RECEIVING";
+          lastTransitionTime = now;
+          currentBank = null;
+          updateStatus("Receiving incoming packet...");
+        }
+      } else if (rxState === "RECEIVING") {
+        // Detect explicit STOP tone
+        if (magStop > 0.008 && magStop > 2.0 * Math.max(powerA, powerB)) {
+          finishPacket();
+          return;
+        }
+
+        // Timeout if carrier is lost for more than 3 seconds
+        if (now - lastTransitionTime > 3000) {
+          resetReceiver("Connection timed out");
+          return;
+        }
+
+        const THRESHOLD = 0.004;
+
+        // Alternate Bank Demodulation: transitions from A -> B and B -> A prevent dropped/duplicated bits
+        if (currentBank !== 'A' && powerA > THRESHOLD && powerA > 1.8 * powerB) {
+          const bit = mag1A > mag0A ? 1 : 0;
+          rxBits.push(bit);
+          currentBank = 'A';
+          lastTransitionTime = now;
+          onBitReceived();
+        } else if (currentBank !== 'B' && powerB > THRESHOLD && powerB > 1.8 * powerA) {
+          const bit = mag1B > mag0B ? 1 : 0;
+          rxBits.push(bit);
+          currentBank = 'B';
+          lastTransitionTime = now;
+          onBitReceived();
+        }
+      }
+    }
+
+    function onBitReceived() {
+      // Decode length header (first 8 bits) to know exact expected packet size
+      if (rxBits.length === 8 && expectedLength === null) {
+        let len = 0;
+        for (let i = 0; i < 8; i++) len = (len << 1) | rxBits[i];
+        if (len > 0 && len <= 60) {
+          expectedLength = len;
+          expectedTotalBits = (expectedLength + 2) * 8; // [Length (1B)] + [Payload (len B)] + [CRC (1B)]
+        } else {
+          resetReceiver("Invalid frame header");
+          return;
+        }
+      }
+
+      if (expectedTotalBits) {
+        updateStatus(`Receiving: ${rxBits.length} / ${expectedTotalBits} bits...`);
+        if (rxBits.length >= expectedTotalBits) {
+          finishPacket();
+        }
+      }
+    }
+
+    function finishPacket() {
+      if (rxBits.length < 16) {
+        resetReceiver();
+        return;
+      }
+
+      const bytes = [];
+      for (let i = 0; i + 8 <= rxBits.length; i += 8) {
+        let b = 0;
+        for (let j = 0; j < 8; j++) b = (b << 1) | rxBits[i + j];
+        bytes.push(b);
+      }
+
+      if (bytes.length < 3) {
+        resetReceiver();
+        return;
+      }
+
+      const len = bytes[0];
+      const payload = bytes.slice(1, 1 + len);
+      const receivedCRC = bytes[1 + len];
+      const computedCRC = computeCRC8(payload);
+
+      // Validate CRC-8 checksum
+      if (receivedCRC === computedCRC && payload.length === len) {
+        const text = new TextDecoder().decode(new Uint8Array(payload));
+        appendChat(text, 'incoming');
+        updateStatus("Message received successfully!");
+      } else {
+        appendChat("[Noise rejected: Checksum mismatch]", 'debug-msg');
+        updateStatus("Packet error: Checksum mismatch");
+      }
+
+      resetReceiver();
+    }
+
+    function resetReceiver(statusText) {
+      rxState = "IDLE";
+      rxBits = [];
+      expectedLength = null;
+      expectedTotalBits = null;
+      currentBank = null;
+      if (statusText) updateStatus(statusText);
+      else setTimeout(() => updateStatus("Listening silently on near-ultrasound band..."), 800);
+    }
+
+    // --- TRANSMITTER ---
     function sendMessage() {
       const input = document.getElementById('textInput');
       const text = input.value.trim();
-      if (!text || isTransmitting || !instance) return;
+      if (!text || isTransmitting) return;
+
+      if (!audioCtx) {
+        alert("Please tap 'START AIRDROP' first to activate the audio system.");
+        return;
+      }
 
       input.value = "";
       appendChat(text, 'outgoing');
-      
-      const sendBtn = document.getElementById('sendBtn');
-      sendBtn.disabled = true;
+
       isTransmitting = true;
-      document.getElementById('status').innerText = "Status: Transmitting silently...";
+      document.getElementById('sendBtn').disabled = true;
+      updateStatus("Transmitting silently...");
 
-      try {
-        // Encode text into raw 16-bit PCM waveform using Ultrasound Fast (protocol 4)
-        const volume = 30; // 0 - 100
-        const waveform = ggwave.encode(instance, text, PROTOCOL_ULTRASOUND_FAST, volume);
+      // Construct packet: [Length Byte] + [ASCII bytes] + [CRC-8 Byte]
+      const encoder = new TextEncoder();
+      const payloadBytes = Array.from(encoder.encode(text));
+      const len = payloadBytes.length;
+      const crc = computeCRC8(payloadBytes);
+      const packetBytes = [len, ...payloadBytes, crc];
 
-        if (!waveform || waveform.length === 0) {
-          throw new Error("ggwave failed to encode the string");
+      const bits = [];
+      for (const byte of packetBytes) {
+        for (let b = 7; b >= 0; b--) {
+          bits.push((byte >> b) & 1);
         }
-
-        // Convert byte buffer to 16-bit signed PCM, then normalize to [-1.0, 1.0] Float32
-        const int16View = new Int16Array(waveform.buffer, waveform.byteOffset, waveform.length / 2);
-        const floatData = new Float32Array(int16View.length);
-        for (let i = 0; i < int16View.length; i++) {
-          floatData[i] = int16View[i] / 32768.0;
-        }
-
-        // Play waveform buffer through device speakers
-        const audioBuffer = audioCtx.createBuffer(1, floatData.length, audioCtx.sampleRate);
-        audioBuffer.getChannelData(0).set(floatData);
-
-        const source = audioCtx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(audioCtx.destination);
-
-        source.onended = () => {
-          setTimeout(() => {
-            isTransmitting = false;
-            sendBtn.disabled = false;
-            document.getElementById('status').innerText = "Status: Listening (Near-Ultrasound band)...";
-          }, 200);
-        };
-
-        source.start();
-      } catch (err) {
-        console.error("Transmission error:", err);
-        document.getElementById('status').innerText = "Send Error: " + err.message;
-        isTransmitting = false;
-        sendBtn.disabled = false;
       }
+
+      const sampleRate = audioCtx.sampleRate;
+      const SYNC_DUR = 0.20; // 200 ms
+      const GAP_DUR  = 0.03; // 30 ms
+      const BIT_DUR  = 0.048; // 48 ms per bit (~21 bits/sec)
+      const STOP_DUR = 0.10; // 100 ms
+
+      const totalDuration = SYNC_DUR + GAP_DUR + (bits.length * BIT_DUR) + STOP_DUR;
+      const totalSamples = Math.ceil(totalDuration * sampleRate);
+
+      const audioBuffer = audioCtx.createBuffer(1, totalSamples, sampleRate);
+      const channelData = audioBuffer.getChannelData(0);
+
+      let sampleOffset = 0;
+
+      // Generates pure sine tones with soft cosine ramps (prevents audible clicks/pops)
+      function writeTone(freq, duration) {
+        const numSamples = Math.floor(duration * sampleRate);
+        const rampSamples = Math.min(Math.floor(0.004 * sampleRate), Math.floor(numSamples * 0.15));
+        for (let i = 0; i < numSamples; i++) {
+          let env = 1.0;
+          if (i < rampSamples) {
+            env = 0.5 * (1 - Math.cos((Math.PI * i) / rampSamples));
+          } else if (i > numSamples - rampSamples) {
+            env = 0.5 * (1 - Math.cos((Math.PI * (numSamples - i)) / rampSamples));
+          }
+          channelData[sampleOffset + i] = 0.70 * env * Math.sin((2 * Math.PI * freq * i) / sampleRate);
+        }
+        sampleOffset += numSamples;
+      }
+
+      function writeSilence(duration) {
+        sampleOffset += Math.floor(duration * sampleRate);
+      }
+
+      // 1. Play Preamble Sync
+      writeTone(F_SYNC, SYNC_DUR);
+      writeSilence(GAP_DUR);
+
+      // 2. Play Data Bits with Bank Alternation
+      for (let i = 0; i < bits.length; i++) {
+        const bit = bits[i];
+        const isEven = (i % 2 === 0);
+        const freq = isEven ? (bit === 1 ? F_1A : F_0A) : (bit === 1 ? F_1B : F_0B);
+        writeTone(freq, BIT_DUR);
+      }
+
+      // 3. Play Stop Tone
+      writeTone(F_STOP, STOP_DUR);
+
+      const source = audioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioCtx.destination);
+
+      source.onended = () => {
+        // Cooldown period allows room reverberations to decay before microphone reactivates
+        setTimeout(() => {
+          isTransmitting = false;
+          document.getElementById('sendBtn').disabled = false;
+          updateStatus("Listening silently on near-ultrasound band...");
+        }, 250);
+      };
+
+      source.start();
     }
 
     function appendChat(text, type) {
       const box = document.getElementById('chatbox');
       const div = document.createElement('div');
       div.className = `msg ${type}`;
-      div.innerText = (type === 'outgoing' ? 'You: ' : 'Remote: ') + text;
+      div.innerText = (type === 'outgoing' ? 'You: ' : (type === 'incoming' ? 'Remote: ' : '')) + text;
       box.appendChild(div);
       box.scrollTop = box.scrollHeight;
+    }
+
+    function updateStatus(text) {
+      document.getElementById('status').innerText = "Status: " + text;
     }
   </script>
 </body>
