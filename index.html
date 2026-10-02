@@ -11,27 +11,54 @@
       color: #58a6ff;
       font-family: monospace;
       margin: 0;
-      padding: 15px;
+      padding: 12px;
       display: flex;
       flex-direction: column;
       align-items: center;
     }
-    h2 { color: #f0f6fc; margin: 10px 0; }
-    #status { color: #8b949e; margin-bottom: 12px; font-size: 13px; text-align: center; }
+    h2 { color: #f0f6fc; margin: 8px 0; }
+    #status { color: #8b949e; margin-bottom: 10px; font-size: 13px; text-align: center; }
 
-    #meter-box {
+    #controls-container {
       width: 100%;
       max-width: 420px;
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .panel {
       background: #161b22;
       border: 1px solid #30363d;
-      border-radius: 6px;
+      border-radius: 8px;
       padding: 10px;
-      margin-bottom: 12px;
-      display: none;
     }
-    .meter-label { font-size: 11px; color: #8b949e; margin-bottom: 5px; }
-    .bar-bg { background: #21262d; height: 10px; border-radius: 5px; overflow: hidden; }
-    #meter-fill { width: 0%; height: 100%; background: #238636; transition: width 0.05s linear; }
+
+    canvas {
+      width: 100%;
+      height: 60px;
+      background: #0d1117;
+      border-radius: 4px;
+      display: block;
+    }
+
+    .mode-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      color: #c9d1d9;
+      margin-top: 6px;
+    }
+
+    select {
+      background: #0d1117;
+      color: #58a6ff;
+      border: 1px solid #30363d;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-family: monospace;
+    }
 
     #startBtn {
       background: #238636;
@@ -42,41 +69,35 @@
       border-radius: 8px;
       cursor: pointer;
       font-weight: bold;
-      margin-bottom: 15px;
+      margin: 15px 0;
     }
-    #startBtn:active { transform: scale(0.98); }
 
-    #chat-container {
-      width: 100%;
-      max-width: 420px;
-      display: none;
-      flex-direction: column;
-      gap: 10px;
-    }
     #chatbox {
       width: 100%;
-      height: 280px;
-      background: #161b22;
+      height: 220px;
+      background: #0d1117;
       border: 1px solid #30363d;
-      border-radius: 8px;
-      padding: 12px;
+      border-radius: 6px;
+      padding: 10px;
       overflow-y: auto;
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 6px;
+      margin-top: 10px;
     }
-    .msg { padding: 8px 12px; border-radius: 6px; max-width: 85%; font-size: 14px; word-break: break-all; }
+
+    .msg { padding: 6px 10px; border-radius: 6px; max-width: 85%; font-size: 13px; word-break: break-all; }
     .incoming { background: #21262d; color: #3fb950; align-self: flex-start; }
     .outgoing { background: #1f6feb; color: #ffffff; align-self: flex-end; }
-    .debug-msg { font-size: 11px; color: #f85149; align-self: center; }
+    .system { font-size: 11px; color: #8b949e; align-self: center; }
 
-    .input-row { display: flex; gap: 8px; }
+    .input-row { display: flex; gap: 8px; margin-top: 10px; }
     input {
       flex: 1;
       background: #0d1117;
       border: 1px solid #30363d;
       color: #fff;
-      padding: 12px;
+      padding: 10px;
       border-radius: 6px;
       font-family: monospace;
     }
@@ -84,7 +105,7 @@
       background: #1f6feb;
       color: #fff;
       border: none;
-      padding: 0 20px;
+      padding: 0 18px;
       border-radius: 6px;
       cursor: pointer;
       font-weight: bold;
@@ -95,39 +116,58 @@
 <body>
 
   <h2>ACOUSTIC AIRDROP</h2>
-  <div id="status">Standby: Tap Start to initialize audio hardware</div>
+  <div id="status">Standby: Tap Start to activate mic & speaker - v6</div>
   <button id="startBtn" onclick="initAcousticChat()">START AIRDROP</button>
 
-  <div id="meter-box">
-    <div class="meter-label">Live Ultrasonic Signal Power:</div>
-    <div class="bar-bg"><div id="meter-fill"></div></div>
-  </div>
+  <div id="controls-container">
+    <div class="panel">
+      <!-- Live Visualizer to prove mic hardware is receiving sound -->
+      <canvas id="visualizer"></canvas>
+      <div class="mode-row">
+        <span>Audio Profile:</span>
+        <select id="bandSelect" onchange="changeBand()">
+          <option value="nearUltra" selected>Near-Ultrasound (14.5 - 16.5 kHz: Silent)</option>
+          <option value="softAudible">Soft Chime (1.6 - 2.4 kHz: Max Range)</option>
+        </select>
+      </div>
+    </div>
 
-  <div id="chat-container">
-    <div id="chatbox"></div>
-    <div class="input-row">
-      <input id="textInput" type="text" placeholder="Type message (e.g. hello)..." onkeydown="if(event.key==='Enter') sendMessage()" />
-      <button id="sendBtn" onclick="sendMessage()">SEND</button>
+    <div class="panel">
+      <div id="chatbox"></div>
+      <div class="input-row">
+        <input id="textInput" type="text" placeholder="Type message..." onkeydown="if(event.key==='Enter') sendMessage()" />
+        <button id="sendBtn" onclick="sendMessage()">SEND</button>
+      </div>
     </div>
   </div>
 
   <script>
-    // --- Near-Ultrasound Frequency Band (Soft & Near-Silent) ---
-    const F_SYNC = 14800; // Preamble wake-up tone
-    // Bank A (used for even bits)
-    const F_0A   = 15300;
-    const F_1A   = 15700;
-    // Bank B (used for odd bits)
-    const F_0B   = 16100;
-    const F_1B   = 16500;
-    // End marker
-    const F_STOP = 16900;
+    // Preset Bands
+    const BANDS = {
+      nearUltra: {
+        F_SYNC: 14400,
+        F_0A:   14900,
+        F_1A:   15400,
+        F_0B:   15900,
+        F_1B:   16400,
+        F_STOP: 16900
+      },
+      softAudible: {
+        F_SYNC: 1600,
+        F_0A:   1800,
+        F_1A:   2000,
+        F_0B:   2200,
+        F_1B:   2400,
+        F_STOP: 2600
+      }
+    };
 
+    let activeBand = BANDS.nearUltra;
     let audioCtx = null;
     let isTransmitting = false;
 
     // Receiver State Machine
-    let rxState = "IDLE"; // "IDLE" | "WAIT_DATA" | "RECEIVING"
+    let rxState = "IDLE";
     let syncStartTime = 0;
     let rxBits = [];
     let expectedLength = null;
@@ -135,13 +175,22 @@
     let currentBank = null;
     let lastTransitionTime = 0;
 
+    let analyserNode = null;
+    let canvasCtx = null;
+
+    function changeBand() {
+      const val = document.getElementById('bandSelect').value;
+      activeBand = BANDS[val];
+      appendChat(`Switched to: ${val === 'nearUltra' ? 'Near-Ultrasound' : 'Soft Chime'} mode`, 'system');
+    }
+
     async function initAcousticChat() {
       try {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
         audioCtx = new AudioContextClass();
         if (audioCtx.state === 'suspended') await audioCtx.resume();
 
-        // Request clean mic stream without aggressive cancellation filters
+        // Request raw mic stream without aggressive cancellation filters
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: false,
@@ -151,24 +200,60 @@
         });
 
         const source = audioCtx.createMediaStreamSource(stream);
-        // ScriptProcessor provides raw, hardware-clocked sample frames (zero rAF jitter)
-        const recorder = audioCtx.createScriptProcessor(1024, 1, 1);
 
+        // Visualizer Analyser
+        analyserNode = audioCtx.createAnalyser();
+        analyserNode.fftSize = 512;
+        source.connect(analyserNode);
+
+        // ScriptProcessor: 1024 sample chunks
+        const recorder = audioCtx.createScriptProcessor(1024, 1, 1);
         recorder.onaudioprocess = handleAudioInput;
         source.connect(recorder);
-        recorder.connect(audioCtx.destination);
+
+        // FIX: Connect through a zero-gain node to prevent browser feedback loop muting
+        const zeroGain = audioCtx.createGain();
+        zeroGain.gain.value = 0;
+        recorder.connect(zeroGain);
+        zeroGain.connect(audioCtx.destination);
+
+        // Setup visualizer
+        const canvas = document.getElementById('visualizer');
+        canvasCtx = canvas.getContext('2d');
+        requestAnimationFrame(drawVisualizer);
 
         document.getElementById('startBtn').style.display = 'none';
-        document.getElementById('meter-box').style.display = 'block';
-        document.getElementById('chat-container').style.display = 'flex';
-        updateStatus("Listening silently on near-ultrasound band...");
+        document.getElementById('controls-container').style.display = 'flex';
+        updateStatus(`Listening at ${audioCtx.sampleRate}Hz sample rate...`);
       } catch (err) {
-        alert("Microphone Init Failed: " + err.message);
+        alert("Audio Init Error: " + err.message);
         updateStatus("Error: " + err.message);
       }
     }
 
-    // Goertzel Algorithm: High-speed single-frequency magnitude detector with Hann windowing
+    // Real-time canvas visualizer
+    function drawVisualizer() {
+      if (!analyserNode) return;
+      const bufferLength = analyserNode.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      analyserNode.getByteFrequencyData(dataArray);
+
+      const canvas = document.getElementById('visualizer');
+      canvasCtx.fillStyle = '#0d1117';
+      canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const barWidth = (canvas.width / bufferLength) * 2;
+      let x = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        const barHeight = (dataArray[i] / 255) * canvas.height;
+        canvasCtx.fillStyle = isTransmitting ? '#1f6feb' : '#238636';
+        canvasCtx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+        x += barWidth + 1;
+      }
+      requestAnimationFrame(drawVisualizer);
+    }
+
+    // Goertzel Single-Frequency Magnitude Detector with Hann Window
     function goertzel(samples, targetFreq, sampleRate) {
       const N = samples.length;
       const k = Math.round((N * targetFreq) / sampleRate);
@@ -178,7 +263,6 @@
       let s_prev2 = 0;
 
       for (let i = 0; i < N; i++) {
-        // Apply Hann window directly to prevent spectral leakage between frequency bins
         const w = 0.5 * (1 - Math.cos((2 * Math.PI * i) / N));
         const s = (samples[i] * w) + coeff * s_prev - s_prev2;
         s_prev2 = s_prev;
@@ -188,17 +272,13 @@
       return Math.sqrt(Math.max(0, power)) / N;
     }
 
-    // CRC-8 Implementation (Polynomial 0x07)
+    // CRC-8 Checksum
     function computeCRC8(bytes) {
       let crc = 0x00;
       for (let i = 0; i < bytes.length; i++) {
         crc ^= bytes[i];
         for (let j = 0; j < 8; j++) {
-          if ((crc & 0x80) !== 0) {
-            crc = ((crc << 1) ^ 0x07) & 0xFF;
-          } else {
-            crc = (crc << 1) & 0xFF;
-          }
+          crc = (crc & 0x80) ? ((crc << 1) ^ 0x07) & 0xFF : (crc << 1) & 0xFF;
         }
       }
       return crc;
@@ -210,26 +290,24 @@
       const samples = e.inputBuffer.getChannelData(0);
       const sampleRate = audioCtx.sampleRate;
 
-      const magSync = goertzel(samples, F_SYNC, sampleRate);
-      const mag0A   = goertzel(samples, F_0A, sampleRate);
-      const mag1A   = goertzel(samples, F_1A, sampleRate);
-      const mag0B   = goertzel(samples, F_0B, sampleRate);
-      const mag1B   = goertzel(samples, F_1B, sampleRate);
-      const magStop = goertzel(samples, F_STOP, sampleRate);
+      // Measure active band frequencies
+      const magSync = goertzel(samples, activeBand.F_SYNC, sampleRate);
+      const mag0A   = goertzel(samples, activeBand.F_0A, sampleRate);
+      const mag1A   = goertzel(samples, activeBand.F_1A, sampleRate);
+      const mag0B   = goertzel(samples, activeBand.F_0B, sampleRate);
+      const mag1B   = goertzel(samples, activeBand.F_1B, sampleRate);
+      const magStop = goertzel(samples, activeBand.F_STOP, sampleRate);
 
       const powerA = Math.max(mag0A, mag1A);
       const powerB = Math.max(mag0B, mag1B);
-      const maxPower = Math.max(magSync, powerA, powerB, magStop);
 
-      // Update signal power visual bar
-      const bar = document.getElementById('meter-fill');
-      bar.style.width = Math.min(100, (maxPower / 0.05) * 100) + "%";
-
+      // Measure ambient noise floor in a guard band 300Hz above stop tone
+      const noiseFloor = goertzel(samples, activeBand.F_STOP + 300, sampleRate) + 0.0001;
       const now = performance.now();
 
       if (rxState === "IDLE") {
-        // Detect wake-up SYNC tone
-        if (magSync > 0.008 && magSync > 2.5 * Math.max(powerA, powerB, magStop)) {
+        // Dynamic SNR trigger: Sync tone must stand out significantly above ambient noise
+        if (magSync > 0.0015 && magSync > 3.0 * noiseFloor && magSync > 2.0 * Math.max(powerA, powerB)) {
           rxState = "WAIT_DATA";
           syncStartTime = now;
           rxBits = [];
@@ -239,38 +317,33 @@
           updateStatus("Signal detected! Synchronizing...");
         }
       } else if (rxState === "WAIT_DATA") {
-        // Allow the 200ms SYNC tone to settle
         if (now - syncStartTime > 220) {
           rxState = "RECEIVING";
           lastTransitionTime = now;
           currentBank = null;
-          updateStatus("Receiving incoming packet...");
+          updateStatus("Receiving data stream...");
         }
       } else if (rxState === "RECEIVING") {
-        // Detect explicit STOP tone
-        if (magStop > 0.008 && magStop > 2.0 * Math.max(powerA, powerB)) {
+        // Stop tone check
+        if (magStop > 0.002 && magStop > 2.5 * noiseFloor && magStop > 1.8 * Math.max(powerA, powerB)) {
           finishPacket();
           return;
         }
 
-        // Timeout if carrier is lost for more than 3 seconds
-        if (now - lastTransitionTime > 3000) {
-          resetReceiver("Connection timed out");
+        // Connection timeout
+        if (now - lastTransitionTime > 3500) {
+          resetReceiver("Signal lost (timeout)");
           return;
         }
 
-        const THRESHOLD = 0.004;
-
-        // Alternate Bank Demodulation: transitions from A -> B and B -> A prevent dropped/duplicated bits
-        if (currentBank !== 'A' && powerA > THRESHOLD && powerA > 1.8 * powerB) {
-          const bit = mag1A > mag0A ? 1 : 0;
-          rxBits.push(bit);
+        // Alternating-bank detection
+        if (currentBank !== 'A' && powerA > 0.0012 && powerA > 1.8 * powerB && powerA > 2.5 * noiseFloor) {
+          rxBits.push(mag1A > mag0A ? 1 : 0);
           currentBank = 'A';
           lastTransitionTime = now;
           onBitReceived();
-        } else if (currentBank !== 'B' && powerB > THRESHOLD && powerB > 1.8 * powerA) {
-          const bit = mag1B > mag0B ? 1 : 0;
-          rxBits.push(bit);
+        } else if (currentBank !== 'B' && powerB > 0.0012 && powerB > 1.8 * powerA && powerB > 2.5 * noiseFloor) {
+          rxBits.push(mag1B > mag0B ? 1 : 0);
           currentBank = 'B';
           lastTransitionTime = now;
           onBitReceived();
@@ -279,15 +352,14 @@
     }
 
     function onBitReceived() {
-      // Decode length header (first 8 bits) to know exact expected packet size
       if (rxBits.length === 8 && expectedLength === null) {
         let len = 0;
         for (let i = 0; i < 8; i++) len = (len << 1) | rxBits[i];
         if (len > 0 && len <= 60) {
           expectedLength = len;
-          expectedTotalBits = (expectedLength + 2) * 8; // [Length (1B)] + [Payload (len B)] + [CRC (1B)]
+          expectedTotalBits = (expectedLength + 2) * 8;
         } else {
-          resetReceiver("Invalid frame header");
+          resetReceiver();
           return;
         }
       }
@@ -313,26 +385,21 @@
         bytes.push(b);
       }
 
-      if (bytes.length < 3) {
-        resetReceiver();
-        return;
+      if (bytes.length >= 3) {
+        const len = bytes[0];
+        const payload = bytes.slice(1, 1 + len);
+        const receivedCRC = bytes[1 + len];
+        const computedCRC = computeCRC8(payload);
+
+        if (receivedCRC === computedCRC && payload.length === len) {
+          const text = new TextDecoder().decode(new Uint8Array(payload));
+          appendChat(text, 'incoming');
+          updateStatus("Message received successfully!");
+        } else {
+          appendChat("[Noise rejected: Checksum mismatch]", 'system');
+          updateStatus("Packet error: Checksum mismatch");
+        }
       }
-
-      const len = bytes[0];
-      const payload = bytes.slice(1, 1 + len);
-      const receivedCRC = bytes[1 + len];
-      const computedCRC = computeCRC8(payload);
-
-      // Validate CRC-8 checksum
-      if (receivedCRC === computedCRC && payload.length === len) {
-        const text = new TextDecoder().decode(new Uint8Array(payload));
-        appendChat(text, 'incoming');
-        updateStatus("Message received successfully!");
-      } else {
-        appendChat("[Noise rejected: Checksum mismatch]", 'debug-msg');
-        updateStatus("Packet error: Checksum mismatch");
-      }
-
       resetReceiver();
     }
 
@@ -343,7 +410,7 @@
       expectedTotalBits = null;
       currentBank = null;
       if (statusText) updateStatus(statusText);
-      else setTimeout(() => updateStatus("Listening silently on near-ultrasound band..."), 800);
+      else setTimeout(() => updateStatus("Listening for acoustic signals..."), 1000);
     }
 
     // --- TRANSMITTER ---
@@ -353,7 +420,7 @@
       if (!text || isTransmitting) return;
 
       if (!audioCtx) {
-        alert("Please tap 'START AIRDROP' first to activate the audio system.");
+        alert("Please tap 'START AIRDROP' first.");
         return;
       }
 
@@ -362,9 +429,8 @@
 
       isTransmitting = true;
       document.getElementById('sendBtn').disabled = true;
-      updateStatus("Transmitting silently...");
+      updateStatus("Transmitting message...");
 
-      // Construct packet: [Length Byte] + [ASCII bytes] + [CRC-8 Byte]
       const encoder = new TextEncoder();
       const payloadBytes = Array.from(encoder.encode(text));
       const len = payloadBytes.length;
@@ -379,65 +445,52 @@
       }
 
       const sampleRate = audioCtx.sampleRate;
-      const SYNC_DUR = 0.20; // 200 ms
-      const GAP_DUR  = 0.03; // 30 ms
-      const BIT_DUR  = 0.048; // 48 ms per bit (~21 bits/sec)
-      const STOP_DUR = 0.10; // 100 ms
+      const SYNC_DUR = 0.20;
+      const GAP_DUR  = 0.03;
+      const BIT_DUR  = 0.050; // 50 ms per bit
+      const STOP_DUR = 0.10;
 
-      const totalDuration = SYNC_DUR + GAP_DUR + (bits.length * BIT_DUR) + STOP_DUR;
-      const totalSamples = Math.ceil(totalDuration * sampleRate);
-
+      const totalSamples = Math.ceil((SYNC_DUR + GAP_DUR + (bits.length * BIT_DUR) + STOP_DUR) * sampleRate);
       const audioBuffer = audioCtx.createBuffer(1, totalSamples, sampleRate);
       const channelData = audioBuffer.getChannelData(0);
 
       let sampleOffset = 0;
 
-      // Generates pure sine tones with soft cosine ramps (prevents audible clicks/pops)
       function writeTone(freq, duration) {
         const numSamples = Math.floor(duration * sampleRate);
-        const rampSamples = Math.min(Math.floor(0.004 * sampleRate), Math.floor(numSamples * 0.15));
+        const ramp = Math.min(Math.floor(0.005 * sampleRate), Math.floor(numSamples * 0.15));
         for (let i = 0; i < numSamples; i++) {
           let env = 1.0;
-          if (i < rampSamples) {
-            env = 0.5 * (1 - Math.cos((Math.PI * i) / rampSamples));
-          } else if (i > numSamples - rampSamples) {
-            env = 0.5 * (1 - Math.cos((Math.PI * (numSamples - i)) / rampSamples));
-          }
-          channelData[sampleOffset + i] = 0.70 * env * Math.sin((2 * Math.PI * freq * i) / sampleRate);
+          if (i < ramp) env = 0.5 * (1 - Math.cos((Math.PI * i) / ramp));
+          else if (i > numSamples - ramp) env = 0.5 * (1 - Math.cos((Math.PI * (numSamples - i)) / ramp));
+          channelData[sampleOffset + i] = 0.75 * env * Math.sin((2 * Math.PI * freq * i) / sampleRate);
         }
         sampleOffset += numSamples;
       }
 
-      function writeSilence(duration) {
-        sampleOffset += Math.floor(duration * sampleRate);
-      }
+      writeTone(activeBand.F_SYNC, SYNC_DUR);
+      sampleOffset += Math.floor(GAP_DUR * sampleRate);
 
-      // 1. Play Preamble Sync
-      writeTone(F_SYNC, SYNC_DUR);
-      writeSilence(GAP_DUR);
-
-      // 2. Play Data Bits with Bank Alternation
       for (let i = 0; i < bits.length; i++) {
         const bit = bits[i];
         const isEven = (i % 2 === 0);
-        const freq = isEven ? (bit === 1 ? F_1A : F_0A) : (bit === 1 ? F_1B : F_0B);
+        const freq = isEven ? (bit === 1 ? activeBand.F_1A : activeBand.F_0A)
+                            : (bit === 1 ? activeBand.F_1B : activeBand.F_0B);
         writeTone(freq, BIT_DUR);
       }
 
-      // 3. Play Stop Tone
-      writeTone(F_STOP, STOP_DUR);
+      writeTone(activeBand.F_STOP, STOP_DUR);
 
       const source = audioCtx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(audioCtx.destination);
 
       source.onended = () => {
-        // Cooldown period allows room reverberations to decay before microphone reactivates
         setTimeout(() => {
           isTransmitting = false;
           document.getElementById('sendBtn').disabled = false;
-          updateStatus("Listening silently on near-ultrasound band...");
-        }, 250);
+          updateStatus("Listening for acoustic signals...");
+        }, 200);
       };
 
       source.start();
